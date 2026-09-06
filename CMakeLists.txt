@@ -2,6 +2,15 @@ cmake_minimum_required(VERSION 3.24.0 FATAL_ERROR)
 
 project(ssb64 LANGUAGES C CXX)
 
+# Optional whole-program Wasm SIMD. The scalar build meets the current FPS
+# target; keep SIMD opt-in while broader device validation is pending. Apply before subdirectories so
+# game code, port glue and the Fast3D interpreter all use the same target ISA.
+option(SSB64_WASM_SIMD "Enable WebAssembly SIMD128 (requires browser SIMD support)" OFF)
+if(EMSCRIPTEN AND SSB64_WASM_SIMD)
+    add_compile_options(-msimd128)
+    add_link_options(-msimd128)
+endif()
+
 # Android needs ASM for the aarch64 coroutine context-switch
 # (port/coroutine_aarch64.S). Enable it before any add_library/add_executable
 # call sees an .S source. ASM is preprocessed by clang on the way through.
@@ -460,6 +469,7 @@ file(GLOB_RECURSE SSB64_SRC_WP      "decomp/src/wp/*.c"      "decomp/src/wp/*.h"
 
 # Port layer (C++ glue) — excludes port/stubs/ which is compiled as part of ssb64_game
 file(GLOB_RECURSE SSB64_SRC_PORT "port/*.cpp" "port/*.c" "port/*.h")
+list(APPEND SSB64_SRC_PORT third_party/meshoptimizer/allocator.cpp third_party/meshoptimizer/vcacheoptimizer.cpp)
 list(FILTER SSB64_SRC_PORT EXCLUDE REGEX "port/stubs/")
 # RelocFileTable.{us,jp}.cpp both define gRelocFileTable — compile only the
 # selected version's table (the rest are siblings for the other version).

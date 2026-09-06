@@ -53,6 +53,16 @@ struct HitCache {
 };
 thread_local HitCache sHitCache;
 
+// Generated custom-mesh DLs can live outside registered asset/arena ranges.
+// Cache the containing gap, not the final classification: WALKED_PAST still
+// depends on the most recent in-range hit and must be checked on every call.
+struct GapCache {
+    uint64_t gen = ~0ull;
+    uintptr_t lower = 0;
+    uintptr_t upper = 0;
+};
+thread_local GapCache sGapCache;
+
 /* "Walked past" threshold: how far past a registered range do we still
  * recognise as runaway-from-that-range? One 64 KiB window comfortably
  * covers the gap to the next mmap'd allocation while staying tight
@@ -111,14 +121,24 @@ extern "C" int port_dl_check_addr(uintptr_t addr) {
         }
     }
 
-    {
+    if (!(sGapCache.gen == gen && addr >= sGapCache.lower && addr < sGapCache.upper)) {
         std::lock_guard<std::mutex> lk(sRangesMtx);
+        uintptr_t lower = 1, upper = UINTPTR_MAX;
         for (const auto &e : sRanges) {
             if ((addr >= e.base) && ((addr - e.base) < e.size)) {
                 sHitCache = HitCache{gen, e.base, e.size};
                 return PORT_DL_IN_RANGE;
             }
+            if (e.base > addr) {
+                if (e.base < upper) upper = e.base;
+            } else {
+                // The containment check above failed, so this end is <= addr
+                // and the addition cannot overflow, even near UINTPTR_MAX.
+                const uintptr_t end = e.base + e.size;
+                if (end > lower) lower = end;
+            }
         }
+        sGapCache = GapCache{gen, lower, upper};
     }
     /* "Walked past" must mean THIS walk left the range it was just in —
      * judged against the thread's last in-range hit, not the shadow of
