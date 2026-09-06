@@ -495,12 +495,24 @@ window.controllerPorts = (() => {
 
 // ---- on-demand roster staging ------------------------------------------
 // Module.__stageUrls: MEMFS path -> URL, registered by the roster boot path.
-// Module.ensureStaged(path): called synchronously from the engine
-// (port/staged_file.c) the first time it opens a roster file. Prefer bytes
-// prefetched in the background; otherwise a synchronous XHR, because the
-// caller is inside an N64-thread fiber and cannot yield. Returns true when
-// the file is in MEMFS afterwards.
+// Module.ensureStaged(path): Asyncify suspends the native caller until the
+// file is ready. Background prefetch and demand loads share one request.
 const stageCache = new Map();
+const stagePending = new Map();
+
+function fetchStaged(path) {
+  if (stageCache.has(path)) return Promise.resolve(stageCache.get(path));
+  if (stagePending.has(path)) return stagePending.get(path);
+  const url = Module.__stageUrls?.[path];
+  const pending = fetch(url).then(async (r) => {
+    if (!r.ok) throw new Error(`fetch ${url}: ${r.status}`);
+    const bytes = new Uint8Array(await r.arrayBuffer());
+    stageCache.set(path, bytes);
+    return bytes;
+  }).finally(() => stagePending.delete(path));
+  stagePending.set(path, pending);
+  return pending;
+}
 
 function stageWrite(path, bytes) {
   const dir = path.substring(0, path.lastIndexOf('/')) || '/';
@@ -512,9 +524,9 @@ async function stageNow(path) {
   if (FS.analyzePath(path).exists) return true;
   const url = Module.__stageUrls?.[path];
   if (!url) return false;
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`fetch ${url}: ${r.status}`);
-  stageWrite(path, new Uint8Array(await r.arrayBuffer()));
+  const bytes = await fetchStaged(path);
+  stageWrite(path, bytes);
+  stageCache.delete(path);
   return true;
 }
 
@@ -526,11 +538,7 @@ function prefetchStaged(paths, concurrency = 3) {
       const path = queue.shift();
       if (FS.analyzePath(path).exists || stageCache.has(path)) continue;
       active++;
-      fetch(Module.__stageUrls[path])
-        .then(async (r) => {
-          if (!r.ok) throw new Error(`${r.status}`);
-          stageCache.set(path, new Uint8Array(await r.arrayBuffer()));
-        })
+      fetchStaged(path)
         .catch((e) => console.warn(`prefetch ${path} failed:`, e.message))
         .finally(() => { active--; next(); });
     }
@@ -538,42 +546,26 @@ function prefetchStaged(paths, concurrency = 3) {
   next();
 }
 
-function fetchSync(url) {
-  const xhr = new XMLHttpRequest();
-  xhr.open('GET', url, false);
-  // Binary through a synchronous XHR: responseType may not be 'arraybuffer'
-  // on the main thread, so read a byte-per-char string instead.
-  xhr.overrideMimeType('text/plain; charset=x-user-defined');
-  xhr.send(null);
-  if (xhr.status !== 200) throw new Error(`${url}: ${xhr.status}`);
-  const text = xhr.responseText;
-  const bytes = new Uint8Array(text.length);
-  for (let i = 0; i < text.length; i++) bytes[i] = text.charCodeAt(i) & 0xff;
-  return bytes;
-}
-
-window.__stageStats = { cached: 0, sync: 0, syncMs: 0 };
-function ensureStaged(path) {
+window.__stageStats = { cached: 0, async: 0, asyncMs: 0 };
+async function ensureStaged(path) {
   if (FS.analyzePath(path).exists) return true;
-  const url = Module.__stageUrls?.[path];
-  if (!url) return false;
-  let bytes = stageCache.get(path);
-  if (bytes) {
-    window.__stageStats.cached++;
-  } else {
-    const t0 = performance.now();
-    try {
-      bytes = fetchSync(url);
-    } catch (e) {
-      console.warn(`ensureStaged ${path}:`, e.message);
-      return false;
+  if (!Module.__stageUrls?.[path]) return false;
+  const cached = stageCache.has(path);
+  const start = performance.now();
+  try {
+    const bytes = await fetchStaged(path);
+    stageWrite(path, bytes);
+    stageCache.delete(path);
+    if (cached) window.__stageStats.cached++;
+    else {
+      window.__stageStats.async++;
+      window.__stageStats.asyncMs += performance.now() - start;
     }
-    window.__stageStats.sync++;
-    window.__stageStats.syncMs += performance.now() - t0;
+    return true;
+  } catch (e) {
+    console.warn(`ensureStaged ${path}:`, e.message);
+    return false;
   }
-  stageCache.delete(path);
-  stageWrite(path, bytes);
-  return true;
 }
 
 var Module = {
@@ -959,7 +951,7 @@ var Module = {
           // fetches the file if it is not in MEMFS yet. Only the tiny
           // roster.txt is written up front; a thousand fighters cost nothing
           // until the cursor lands on one. A background prefetch (first page
-          // first) fills a byte cache so the synchronous fallback is rare.
+          // first) fills a byte cache to avoid waiting on demand.
           Module.__stageUrls = Module.__stageUrls || {};
           // Pages (12 tiles each) whose bundles are prefetched in the
           // background after boot; later pages stage on demand.

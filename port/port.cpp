@@ -1543,9 +1543,9 @@ int main(int argc, char* argv[]) {
 		}
 
 #ifdef __EMSCRIPTEN__
-		/* Browser: yield to the event loop once per frame — this is the
-		 * only legal place for an Asyncify sleep (never inside a fiber;
-		 * PortPushFrame has returned to the main context here). Also
+		/* Browser: pace frames from the main context after PortPushFrame
+		 * returns. Staged asset loads may separately suspend a fiber with
+		 * Asyncify while awaiting fetch; they do not advance the frame. Also
 		 * paces the game to ~60Hz since the in-fiber pacer is disabled
 		 * on WASM (see gameloop.cpp). */
 		{
