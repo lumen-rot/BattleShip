@@ -461,7 +461,7 @@ window.controllerPorts = (() => {
   // Engine entry point: fill 4 x {kind, button, stick_x, stick_y} int32s.
   function readPorts(ptr) {
     if (!engaged) return;
-    const H = Module.HEAP32;
+    const H = typeof HEAP32 !== 'undefined' ? HEAP32 : Module.HEAP32;
     if (!H) return;
     const base = ptr >> 2;
     const gps = navigator.getGamepads ? navigator.getGamepads() : [];
@@ -1003,6 +1003,13 @@ var Module = {
         }
       }
       performance.mark('shell:staged');
+      if (params.get('SSB64_NETPLAY') === '1') {
+        const deadline = performance.now() + 30000;
+        while (typeof Module.netplayOpen !== 'function') {
+          if (performance.now() >= deadline) throw new Error('The online connection was not attached.');
+          await new Promise(resolve => setTimeout(resolve, 20));
+        }
+      }
       setStatus('starting…');
     } catch (e) {
       // The site closed or re-launched this frame mid-stage: the aborted
